@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "start:prod": "NODE_ENV=production node .next/standalone/server.js",
-    "worker": "tsx src/lib/worker.ts",
+    "worker": "tsx src/lib/print/worker.ts",
     "lint": "next lint",
     "format": "prettier --check .",
     "format:fix": "prettier --write .",
@@ -23,16 +23,17 @@
   },
   "dependencies": {
     "@prisma/client": "^6.5.0",
+    "bcryptjs": "^2.4.3",
     "bullmq": "^5.34.0",
+    "ioredis": "^5.4.0",
     "iron-session": "^8.0.4",
     "next": "^15.2.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "zod": "^3.24.0",
-    "bcryptjs": "^2.4.3",
-    "ioredis": "^5.4.0"
+    "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.2",
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",

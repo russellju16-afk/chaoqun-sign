@@ -1,7 +1,23 @@
 import crypto from "node:crypto";
 
-const SIGN_SECRET = process.env.SIGN_TOKEN_SECRET ?? "";
 const EXPIRY_HOURS = Number(process.env.SIGN_TOKEN_EXPIRY_HOURS ?? "72");
+
+/**
+ * Resolve the signing secret at call time rather than module-load time.
+ * This avoids crashing imported modules at build or edge-cold-start phase
+ * while still failing loudly when the secret is actually needed at runtime.
+ * An empty / missing secret makes all sign tokens trivially forgeable.
+ */
+function requireSignSecret(): string {
+  const secret = process.env.SIGN_TOKEN_SECRET;
+  if (!secret) {
+    throw new Error(
+      "[auth] SIGN_TOKEN_SECRET environment variable is not set. " +
+        "Set it to a strong random string before starting the server.",
+    );
+  }
+  return secret;
+}
 
 interface TokenPayload {
   orderId: string;
@@ -17,7 +33,7 @@ export function generateSignToken(orderId: string): {
   const payload = JSON.stringify({ orderId, exp });
   const encoded = Buffer.from(payload).toString("base64url");
   const sig = crypto
-    .createHmac("sha256", SIGN_SECRET)
+    .createHmac("sha256", requireSignSecret())
     .update(encoded)
     .digest("base64url");
   return {
@@ -33,7 +49,7 @@ export function verifySignToken(token: string): TokenPayload | null {
   const [encoded, sig] = parts;
 
   const expectedSig = crypto
-    .createHmac("sha256", SIGN_SECRET)
+    .createHmac("sha256", requireSignSecret())
     .update(encoded)
     .digest("base64url");
 
@@ -60,8 +76,15 @@ export function verifyWebhookSignature(
     .createHmac("sha256", secret)
     .update(body)
     .digest("hex");
-  return crypto.timingSafeEqual(
-    Buffer.from(signature),
-    Buffer.from(expected),
-  );
+
+  // timingSafeEqual throws a RangeError when the two buffers have different
+  // byte lengths, which would happen any time an attacker (or misconfigured
+  // caller) sends a header value whose length differs from the 64-char hex
+  // digest.  Convert both to the same fixed-length Buffer before comparing.
+  const sigBuf = Buffer.from(signature);
+  const expBuf = Buffer.from(expected);
+  if (sigBuf.byteLength !== expBuf.byteLength) {
+    return false;
+  }
+  return crypto.timingSafeEqual(sigBuf, expBuf);
 }
