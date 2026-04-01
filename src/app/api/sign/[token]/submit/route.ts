@@ -217,6 +217,7 @@ export async function POST(
 
   // Fire-and-forget Feishu notification
   void notifySignComplete({
+    orderId: order.id,
     orderNo: order.orderNo,
     customerName: order.customerName,
     signerName,

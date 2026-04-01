@@ -3,6 +3,7 @@ import { redis } from "@/lib/redis";
 import { prisma } from "@/lib/db";
 import { generateDeliveryNoteHtml } from "./template";
 import type { PrintJobData, OrderWithItems } from "./types";
+import { notifyPrintCompleted } from "@/lib/lark";
 
 // ── Printer stub ───────────────────────────────────────────────────────────────
 
@@ -109,6 +110,12 @@ export const printWorker = new Worker<PrintJobData>(
       console.log(
         `[print-worker] job=${job.id} printJobId=${printJobId} completed`,
       );
+
+      // 6. Fire-and-forget 飞书通知（打印完成）
+      void notifyPrintCompleted({
+        orderNo: order.orderNo,
+        customerName: order.customerName,
+      });
     } catch (err: unknown) {
       const message =
         err instanceof Error ? err.message : "Unknown error during printing";

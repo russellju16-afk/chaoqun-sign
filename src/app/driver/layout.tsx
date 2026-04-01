@@ -16,7 +16,12 @@ const TAB_ITEMS = [
     label: "今日订单",
     exact: true,
     icon: (
-      <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <svg
+        className="h-6 w-6"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+      >
         <path
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -31,7 +36,12 @@ const TAB_ITEMS = [
     label: "统计",
     exact: false,
     icon: (
-      <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <svg
+        className="h-6 w-6"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+      >
         <path
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -46,7 +56,12 @@ const TAB_ITEMS = [
     label: "我的",
     exact: false,
     icon: (
-      <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <svg
+        className="h-6 w-6"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+      >
         <path
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -58,7 +73,11 @@ const TAB_ITEMS = [
   },
 ];
 
-export default function DriverLayout({ children }: { children: React.ReactNode }) {
+export default function DriverLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   const pathname = usePathname();
   const router = useRouter();
   const [, setUser] = useState<DriverUser | null>(null);
@@ -68,6 +87,13 @@ export default function DriverLayout({ children }: { children: React.ReactNode }
   if (pathname === "/driver/login") {
     return <>{children}</>;
   }
+
+  // 注册 Service Worker，满足 PWA 安装条件
+  useEffect(() => {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
+  }, []);
 
   useEffect(() => {
     fetch("/api/driver/auth/me")
@@ -107,7 +133,9 @@ export default function DriverLayout({ children }: { children: React.ReactNode }
             <div className="flex h-7 w-7 items-center justify-center rounded-md bg-white/20 text-white text-xs font-bold">
               超
             </div>
-            <span className="text-base font-semibold text-white">超群签收 · 司机端</span>
+            <span className="text-base font-semibold text-white">
+              超群签收 · 司机端
+            </span>
           </div>
         </div>
       </header>

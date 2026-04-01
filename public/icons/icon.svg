@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- 蓝色圆角背景 -->
+  <rect width="512" height="512" rx="96" fill="#2563eb"/>
+  <!-- 白色"超"字，居中显示 -->
+  <text
+    x="256"
+    y="340"
+    font-family="PingFang SC, Noto Sans SC, Microsoft YaHei, sans-serif"
+    font-size="260"
+    font-weight="700"
+    fill="white"
+    text-anchor="middle"
+  >超</text>
+</svg>

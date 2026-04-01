@@ -3,6 +3,7 @@ import { z } from "zod";
 import { verifySignToken } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 import { badRequest, notFound } from "@/lib/errors";
+import { notifyOrderRejected } from "@/lib/lark";
 
 interface RouteContext {
   params: Promise<{ token: string }>;
@@ -114,6 +115,14 @@ export async function POST(
           undefined,
       },
     });
+  });
+
+  // Fire-and-forget 飞书通知
+  void notifyOrderRejected({
+    orderId: order.id,
+    orderNo: order.orderNo,
+    customerName: order.customerName,
+    reason,
   });
 
   return NextResponse.json({

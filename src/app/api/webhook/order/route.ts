@@ -219,6 +219,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // --- 4. Fire-and-forget Lark notification ---
     void notifyNewOrder({
+      orderId: order.id,
       orderNo: order.orderNo,
       customerName: order.customerName,
       totalAmount: order.totalAmount,

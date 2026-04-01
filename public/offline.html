@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>网络连接中断 — 超群签收</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+          "Helvetica Neue", sans-serif;
+        background-color: #f9fafb;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }
+
+      .card {
+        background: #fff;
+        border-radius: 16px;
+        padding: 40px 32px;
+        text-align: center;
+        max-width: 360px;
+        width: 100%;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+      }
+
+      /* 信号断开图标 */
+      .icon {
+        width: 64px;
+        height: 64px;
+        margin: 0 auto 24px;
+        background: #eff6ff;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .icon svg {
+        width: 32px;
+        height: 32px;
+        color: #2563eb;
+      }
+
+      h1 {
+        font-size: 18px;
+        font-weight: 600;
+        color: #111827;
+        margin-bottom: 8px;
+      }
+
+      p {
+        font-size: 14px;
+        color: #6b7280;
+        line-height: 1.6;
+        margin-bottom: 28px;
+      }
+
+      button {
+        background: #2563eb;
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        padding: 12px 32px;
+        font-size: 15px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: background 0.15s;
+        width: 100%;
+      }
+
+      button:hover {
+        background: #1d4ed8;
+      }
+
+      button:active {
+        background: #1e40af;
+      }
+
+      .brand {
+        margin-top: 24px;
+        font-size: 12px;
+        color: #9ca3af;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <!-- 无网络图标 -->
+      <div class="icon">
+        <svg
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            d="M18.364 5.636a9 9 0 010 12.728M15.536 8.464a5 5 0 010 7.072M12 12h.01M3 3l18 18"
+          />
+        </svg>
+      </div>
+
+      <h1>网络连接中断</h1>
+      <p>无法连接到服务器，请检查网络设置后重试。</p>
+
+      <button onclick="window.location.reload()">重新连接</button>
+
+      <div class="brand">超群签收 · 司机端</div>
+    </div>
+  </body>
+</html>
