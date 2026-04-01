@@ -1,0 +1,193 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 司机
+model Driver {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deliveryOrders DeliveryOrder[]
+
+  @@map("driver")
+}
+
+// 客户签收配置
+model CustomerConfig {
+  id             String   @id @default(cuid())
+  kdCustomerId   String   @unique @map("kd_customer_id") // 金蝶客户 ID
+  customerName   String   @map("customer_name")
+  signMode       SignMode @default(DIGITAL) @map("sign_mode")
+  contactPhone   String?  @map("contact_phone") // 收货联系人手机
+  contactName    String?  @map("contact_name")
+  requirePhoto   Boolean  @default(false) @map("require_photo") // 是否需要拍照
+  autoPrint      Boolean  @default(false) @map("auto_print") // 是否自动打印纸质单
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  deliveryOrders DeliveryOrder[]
+
+  @@map("customer_config")
+}
+
+// 送货单
+model DeliveryOrder {
+  id              String      @id @default(cuid())
+  orderNo         String      @unique @map("order_no") // 送货单号
+  kdBillId        String?     @map("kd_bill_id") // 金蝶销售出库单 ID
+  kdBillNo        String?     @map("kd_bill_no") // 金蝶单号
+
+  // 客户信息
+  customerId      String?     @map("customer_id")
+  customer        CustomerConfig? @relation(fields: [customerId], references: [id])
+  customerName    String      @map("customer_name")
+  customerPhone   String?     @map("customer_phone")
+  customerAddress String?     @map("customer_address")
+
+  // 司机信息
+  driverId        String?     @map("driver_id")
+  driver          Driver?     @relation(fields: [driverId], references: [id])
+
+  // 金额 (单位：分)
+  totalAmount     BigInt      @map("total_amount")
+  status          OrderStatus @default(PENDING)
+
+  // 签收 token
+  signToken       String?     @unique @map("sign_token")
+  signTokenExpiry DateTime?   @map("sign_token_expiry")
+
+  // 时间
+  deliveryDate    DateTime    @map("delivery_date")
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  items       DeliveryItem[]
+  signRecord  SignRecord?
+  printJobs   PrintJob[]
+
+  @@index([kdBillNo])
+  @@index([status])
+  @@index([deliveryDate])
+  @@map("delivery_order")
+}
+
+// 送货单明细
+model DeliveryItem {
+  id              String @id @default(cuid())
+  orderId         String @map("order_id")
+  order           DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  kdMaterialId    String?  @map("kd_material_id") // 金蝶物料 ID
+  productName     String   @map("product_name")
+  spec            String?  // 规格
+  unit            String   // 单位
+  quantity        Decimal  @db.Decimal(10, 2)
+  unitPrice       BigInt   @map("unit_price") // 单价（分）
+  amount          BigInt   // 金额（分）
+  remark          String?
+
+  @@map("delivery_item")
+}
+
+// 签收记录
+model SignRecord {
+  id            String   @id @default(cuid())
+  orderId       String   @unique @map("order_id")
+  order         DeliveryOrder @relation(fields: [orderId], references: [id])
+
+  signerName    String   @map("signer_name")
+  signerPhone   String?  @map("signer_phone")
+  signatureUrl  String   @map("signature_url") // OSS URL
+  photoUrls     String[] @map("photo_urls")    // 拍照 URL 列表
+  remark        String?
+  signedAt      DateTime @map("signed_at")
+  ipAddress     String?  @map("ip_address")
+  userAgent     String?  @map("user_agent")
+  createdAt     DateTime @default(now())
+
+  @@map("sign_record")
+}
+
+// 打印任务
+model PrintJob {
+  id          String      @id @default(cuid())
+  orderId     String      @map("order_id")
+  order       DeliveryOrder @relation(fields: [orderId], references: [id])
+
+  printerName String      @map("printer_name")
+  copies      Int         @default(1)
+  status      PrintStatus @default(QUEUED)
+  error       String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@map("print_job")
+}
+
+// 管理员
+model AdminUser {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String   @map("password_hash")
+  displayName  String   @map("display_name")
+  role         Role     @default(VIEWER)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  auditLogs AuditLog[]
+
+  @@map("admin_user")
+}
+
+// 审计日志
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?  @map("user_id")
+  user      AdminUser? @relation(fields: [userId], references: [id])
+  action    String
+  target    String   // e.g. "delivery_order:xxx"
+  detail    String?  @db.Text
+  ipAddress String?  @map("ip_address")
+  createdAt DateTime @default(now())
+
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_log")
+}
+
+enum SignMode {
+  DIGITAL
+  PAPER
+  BOTH
+}
+
+enum OrderStatus {
+  PENDING   // 待送货
+  DELIVERED // 已送达，待签收
+  SIGNED    // 已签收
+  REJECTED  // 拒收
+  CANCELLED // 已取消
+}
+
+enum PrintStatus {
+  QUEUED
+  PRINTING
+  COMPLETED
+  FAILED
+}
+
+enum Role {
+  ADMIN
+  DRIVER
+  VIEWER
+}
