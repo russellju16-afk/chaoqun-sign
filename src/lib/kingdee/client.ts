@@ -1,22 +1,24 @@
 /**
- * Kingdee 云星辰 Open API — base HTTP client with OAuth2 token management.
+ * Kingdee 云星辰 Open API — base HTTP client with app-token 管理。
  *
- * Token lifecycle:
- *   - Fetched on first authenticated call.
- *   - Cached in module scope (acceptable for serverless — process lifetime
- *     is short and a single warm token is reused across requests in the same
- *     invocation window).
- *   - Automatically refreshed if the cached token has expired (with a 60 s
- *     safety margin).
+ * 认证流程（严格遵循金蝶官方文档）:
+ *   1. 用 client_id + client_secret + app_key + app_signature 换取 app-token
+ *   2. 每次 API 请求携带 app-token + X-Api-Signature 签名头
+ *   3. app-token 24h 有效，提前 1h 自动刷新
  *
  * Env vars required:
- *   KINGDEE_APP_ID       — OAuth2 client ID
- *   KINGDEE_APP_SECRET   — OAuth2 client secret
- *   KINGDEE_API_BASE     — base URL, e.g. "https://api.kingdee.com"
- *   KINGDEE_ACCOUNT_ID   — 账套 ID, passed in every API request header
+ *   KINGDEE_CLIENT_ID      — 开放平台 Client ID
+ *   KINGDEE_CLIENT_SECRET   — 开放平台 Client Secret
+ *   KINGDEE_APP_KEY         — 应用 key（授权安装后获得）
+ *   KINGDEE_APP_SECRET      — 应用 secret（24h 刷新）
+ *   KINGDEE_GW_ROUTER_ADDR  — 网关路由地址（IDC 域名，如 https://tf.jdy.com）
+ *
+ * Optional:
+ *   KINGDEE_BASE_URL — 业务 API base，默认 https://api.kingdee.com/jdy/v2
+ *   KINGDEE_AUTH_URL — token 端点，默认 https://api.kingdee.com/jdyconnector/app_management/kingdee_auth_token
  */
 
-import type { KingdeeApiResponse, KingdeeTokenData } from "./types";
+import { buildAppSignature, buildApiSignature } from "./auth";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -30,12 +32,29 @@ function requireEnv(name: string): string {
   return value;
 }
 
-function getConfig() {
+interface KingdeeConfig {
+  readonly clientId: string;
+  readonly clientSecret: string;
+  readonly appKey: string;
+  readonly appSecret: string;
+  readonly baseUrl: string;
+  readonly authUrl: string;
+  readonly gwRouterAddr: string;
+}
+
+function getConfig(): KingdeeConfig {
   return {
-    appId: requireEnv("KINGDEE_APP_ID"),
+    clientId: requireEnv("KINGDEE_CLIENT_ID"),
+    clientSecret: requireEnv("KINGDEE_CLIENT_SECRET"),
+    appKey: requireEnv("KINGDEE_APP_KEY"),
     appSecret: requireEnv("KINGDEE_APP_SECRET"),
-    apiBase: requireEnv("KINGDEE_API_BASE").replace(/\/$/, ""),
-    accountId: requireEnv("KINGDEE_ACCOUNT_ID"),
+    baseUrl: (
+      process.env.KINGDEE_BASE_URL ?? "https://api.kingdee.com/jdy/v2"
+    ).replace(/\/$/, ""),
+    authUrl:
+      process.env.KINGDEE_AUTH_URL ??
+      "https://api.kingdee.com/jdyconnector/app_management/kingdee_auth_token",
+    gwRouterAddr: process.env.KINGDEE_GW_ROUTER_ADDR ?? "",
   };
 }
 
@@ -44,40 +63,35 @@ function getConfig() {
 // ---------------------------------------------------------------------------
 
 interface TokenCache {
-  readonly accessToken: string;
-  /** Epoch ms at which the token expires. */
-  readonly expiresAt: number;
+  readonly appToken: string;
+  readonly obtainedAt: number; // epoch ms
 }
 
-/** Module-level token cache. One per process/warm lambda instance. */
 let tokenCache: TokenCache | null = null;
 
-/** Safety margin (ms) before declared expiry at which we force a refresh. */
-const TOKEN_EXPIRY_MARGIN_MS = 60_000;
+/** app-token 有效期 24 小时，提前 1 小时刷新。 */
+const TOKEN_TTL_MS = 24 * 3600 * 1000;
+const TOKEN_REFRESH_BUFFER_MS = 3600 * 1000;
 
 function isCacheValid(cache: TokenCache): boolean {
-  return Date.now() < cache.expiresAt - TOKEN_EXPIRY_MARGIN_MS;
+  return Date.now() - cache.obtainedAt < TOKEN_TTL_MS - TOKEN_REFRESH_BUFFER_MS;
 }
 
 // ---------------------------------------------------------------------------
 // Token fetch
 // ---------------------------------------------------------------------------
 
-async function fetchAccessToken(): Promise<TokenCache> {
-  const { appId, appSecret, apiBase } = getConfig();
+async function fetchAppToken(): Promise<TokenCache> {
+  const config = getConfig();
+  const appSig = buildAppSignature(config.appKey, config.appSecret);
 
-  const url = `${apiBase}/jdyconnector/app_management/api/oauth/token`;
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    app_id: appId,
-    app_secret: appSecret,
-  });
+  const url = new URL(config.authUrl);
+  url.searchParams.set("client_id", config.clientId);
+  url.searchParams.set("client_secret", config.clientSecret);
+  url.searchParams.set("app_key", config.appKey);
+  url.searchParams.set("app_signature", appSig);
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
+  const response = await fetch(url.toString(), { method: "GET" });
 
   if (!response.ok) {
     const text = await response.text().catch(() => "(no body)");
@@ -86,34 +100,36 @@ async function fetchAccessToken(): Promise<TokenCache> {
     );
   }
 
-  const json = (await response.json()) as KingdeeApiResponse<KingdeeTokenData>;
+  const json = (await response.json()) as {
+    errcode: number;
+    description?: string;
+    description_cn?: string;
+    data?: { "app-token": string; access_token?: string; uid?: string };
+  };
 
-  if (json.code !== 0) {
+  if (json.errcode !== 0 || !json.data) {
     throw new Error(
-      `[kingdee] Token API error (code=${json.code}): ${json.message}`,
+      `[kingdee] Token error (errcode=${json.errcode}): ${json.description ?? json.description_cn ?? "unknown"}`,
     );
   }
 
-  const expiresAt = Date.now() + json.data.expires_in * 1000;
-  return { accessToken: json.data.access_token, expiresAt };
+  return {
+    appToken: json.data["app-token"],
+    obtainedAt: Date.now(),
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Public: getAccessToken
+// Public: getAppToken
 // ---------------------------------------------------------------------------
 
-/**
- * Returns a valid access token, fetching or refreshing as needed.
- * All callers share the module-level cache.
- */
-export async function getAccessToken(): Promise<string> {
+export async function getAppToken(): Promise<string> {
   if (tokenCache !== null && isCacheValid(tokenCache)) {
-    return tokenCache.accessToken;
+    return tokenCache.appToken;
   }
-
-  const fresh = await fetchAccessToken();
+  const fresh = await fetchAppToken();
   tokenCache = fresh;
-  return fresh.accessToken;
+  return fresh.appToken;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,51 +137,87 @@ export async function getAccessToken(): Promise<string> {
 // ---------------------------------------------------------------------------
 
 /**
- * Make an authenticated request to the Kingdee Open API.
+ * Make an authenticated request to the Kingdee JDY v2 API.
  *
- * @param method  HTTP method ("GET" | "POST" | "PUT" | ...)
- * @param path    Path relative to apiBase, e.g. "/jdyconnector/..."
- * @param body    Optional JSON body (for POST/PUT requests)
- * @returns       The parsed `data` field from the Kingdee response envelope
- * @throws        On HTTP errors or non-zero Kingdee response codes
+ * Every request carries:
+ * - app-token header
+ * - X-Api-Signature + X-Api-Nonce + X-Api-TimeStamp headers
+ * - X-GW-Router-Addr header (if configured)
+ *
+ * @param method HTTP method (GET / POST / DELETE)
+ * @param path   Path relative to baseUrl, e.g. "/scm/sal_out_bound"
+ * @param opts   Optional body (POST) and/or query params (GET)
+ * @returns      The `data` field from the Kingdee response envelope
  */
 export async function kingdeeRequest<T>(
   method: string,
   path: string,
-  body?: Record<string, unknown>,
+  opts?: {
+    body?: Record<string, unknown>;
+    params?: Record<string, string>;
+  },
 ): Promise<T> {
-  const { apiBase, accountId } = getConfig();
-  const accessToken = await getAccessToken();
+  const config = getConfig();
+  const appToken = await getAppToken();
 
-  const url = `${apiBase}${path}`;
+  // Build full URL
+  const fullUrl = new URL(`${config.baseUrl}${path}`);
+  if (opts?.params) {
+    for (const [k, v] of Object.entries(opts.params)) {
+      fullUrl.searchParams.set(k, v);
+    }
+  }
+
+  // Signature path = baseUrl path + API path
+  // e.g. "/jdy/v2" + "/scm/sal_out_bound" = "/jdy/v2/scm/sal_out_bound"
+  const baseUrlObj = new URL(config.baseUrl);
+  const sigPath = `${baseUrlObj.pathname.replace(/\/$/, "")}${path}`;
+
+  const sig = buildApiSignature({
+    method: method.toUpperCase(),
+    path: sigPath,
+    params: opts?.params ?? null,
+    clientSecret: config.clientSecret,
+  });
+
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${accessToken}`,
-    "X-KD-AccountId": accountId,
+    "X-Api-ClientID": config.clientId,
+    "X-Api-Auth-Version": "2.0",
+    "X-Api-TimeStamp": sig.timestamp,
+    "X-Api-SignHeaders": "X-Api-TimeStamp,X-Api-Nonce",
+    "X-Api-Nonce": sig.nonce,
+    "X-Api-Signature": sig.signature,
+    "app-token": appToken,
   };
+
+  if (config.gwRouterAddr) {
+    headers["X-GW-Router-Addr"] = config.gwRouterAddr;
+  }
 
   const init: RequestInit = {
-    method,
+    method: method.toUpperCase(),
     headers,
-    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    ...(opts?.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
   };
 
-  const response = await fetch(url, init);
+  const response = await fetch(fullUrl.toString(), init);
 
-  if (!response.ok) {
-    const text = await response.text().catch(() => "(no body)");
+  let result: { errcode?: number; description?: string; description_cn?: string; data?: T };
+  try {
+    result = (await response.json()) as typeof result;
+  } catch {
     throw new Error(
-      `[kingdee] API HTTP error: ${method} ${path} → ${response.status} ${response.statusText} — ${text}`,
+      `[kingdee] API HTTP error: ${method} ${path} → ${response.status} — unable to parse response`,
     );
   }
 
-  const json = (await response.json()) as KingdeeApiResponse<T>;
-
-  if (json.code !== 0) {
+  const errcode = result.errcode ?? 0;
+  if (response.status !== 200 || errcode !== 0) {
     throw new Error(
-      `[kingdee] API error (code=${json.code}) on ${method} ${path}: ${json.message}`,
+      `[kingdee] API error (errcode=${errcode}) on ${method} ${path}: ${result.description ?? result.description_cn ?? "unknown"}`,
     );
   }
 
-  return json.data;
+  return (result.data ?? result) as T;
 }

@@ -1,95 +1,98 @@
 /**
  * Kingdee 云星辰 Open API — shared type definitions.
  *
- * Field naming convention:
- *   - All types here use English camelCase property names.
- *   - Raw API shapes (prefixed with `Raw`) use the Chinese / snake_case
- *     field names that the Kingdee wire format actually sends.
+ * 金蝶云星辰（JDY）使用扁平 snake_case 字段名，NOT F-prefix 旗舰版风格。
+ * 所有类型基于实际 API 响应结构定义。
  */
-
-// ---------------------------------------------------------------------------
-// Generic API envelope
-// ---------------------------------------------------------------------------
-
-export interface KingdeeApiResponse<T> {
-  readonly code: number;
-  /** Human-readable status message. Non-empty when code !== 0. */
-  readonly message: string;
-  readonly data: T;
-}
-
-// ---------------------------------------------------------------------------
-// Token response
-// ---------------------------------------------------------------------------
-
-export interface KingdeeTokenData {
-  readonly access_token: string;
-  /** Lifetime in seconds. */
-  readonly expires_in: number;
-  readonly token_type: string;
-}
 
 // ---------------------------------------------------------------------------
 // Bill status
 // ---------------------------------------------------------------------------
 
 /**
- * 销售出库单 status codes as returned by Kingdee.
- *
- * A  = 草稿 (draft)
- * B  = 已审核 (approved)
- * C  = 部分出库 (partially shipped)
- * D  = 完全出库 (fully shipped)
- * X  = 已作废 (voided)
+ * 销售出库单审核状态。
+ * 金蝶云星辰实际返回的 bill_status 值。
  */
-export enum KingdeeBillStatus {
-  Draft = "A",
-  Approved = "B",
-  PartiallyShipped = "C",
-  FullyShipped = "D",
-  Voided = "X",
+export type KingdeeBillStatus =
+  | "Draft"       // 草稿（未审核）
+  | "Approved"    // 已审核
+  | "Voided";     // 已作废
+
+// ---------------------------------------------------------------------------
+// Raw API response shapes (from GET /scm/sal_out_bound)
+// ---------------------------------------------------------------------------
+
+/** 出库单列表查询 — 单行记录。 */
+export interface RawSaleOutboundRow {
+  readonly id: string;
+  readonly bill_no: string;
+  readonly bill_date: string; // "YYYY-MM-DD"
+  readonly customer_id: string;
+  readonly customer_name: string;
+  readonly customer_number: string;
+  readonly bill_status: string;
+  readonly total_amount?: number;
+  readonly all_amount?: number;
+  readonly remark?: string;
+}
+
+/** 出库单列表查询 — 响应 data 结构。 */
+export interface SaleOutboundListData {
+  readonly total: number;
+  readonly page: number;
+  readonly page_size: number;
+  readonly rows: readonly RawSaleOutboundRow[];
+}
+
+/** 出库单明细行（from GET /scm/sal_out_bound_detail）。 */
+export interface RawSaleOutboundItem {
+  readonly material_id: string;
+  readonly material_name?: string;
+  readonly material_number?: string;
+  readonly unit_id: string;
+  readonly unit_name?: string;
+  readonly unit_number?: string;
+  readonly stock_id: string;
+  readonly stock_name?: string;
+  readonly stock_number?: string;
+  readonly qty: number;
+  readonly price: number;
+  readonly tax_price?: number;
+  readonly amount?: number;
+  readonly all_amount?: number;
+  readonly comment?: string;
+  readonly batch_no?: string;
+}
+
+/** 出库单详情 — 响应 data 结构。 */
+export interface RawSaleOutboundDetail {
+  readonly id: string;
+  readonly bill_no: string;
+  readonly bill_date: string;
+  readonly bill_status: string;
+  readonly customer_id: string;
+  readonly customer_name: string;
+  readonly customer_number?: string;
+  readonly remark?: string;
+  readonly total_amount?: number;
+  readonly all_amount?: number;
+  readonly material_entity: readonly RawSaleOutboundItem[];
 }
 
 // ---------------------------------------------------------------------------
-// Raw wire shapes (field names from the Kingdee API)
-// ---------------------------------------------------------------------------
-
-export interface RawKingdeeItem {
-  readonly FMaterialId: string;
-  readonly FMaterialName: string;
-  readonly FSpecification: string;
-  readonly FUnitName: string;
-  readonly FRealQty: number;
-  readonly FTaxPrice: number;
-  readonly FAmount: number;
-  readonly FNote?: string;
-}
-
-export interface RawKingdeeSaleOutbound {
-  readonly FBillId: string;
-  readonly FBillNo: string;
-  readonly FDate: string; // "YYYY-MM-DD"
-  readonly FCustName: string;
-  readonly FCustId: string;
-  readonly FEntity: RawKingdeeItem[];
-  readonly FAllAmount: number;
-  readonly FDocumentStatus: string; // maps to KingdeeBillStatus
-  readonly FNote?: string;
-}
-
-// ---------------------------------------------------------------------------
-// Domain types (English field names, used inside our application)
+// Domain types (application-side, English camelCase)
 // ---------------------------------------------------------------------------
 
 export interface KingdeeSaleOutboundItem {
   readonly materialId: string;
   readonly materialName: string;
-  readonly spec: string;
   readonly unit: string;
   readonly qty: number;
-  /** Unit price in yuan (float). */
+  /** 不含税单价（元） */
   readonly price: number;
-  /** Line amount in yuan (float). */
+  /** 含税单价（元） */
+  readonly taxPrice: number;
+  /** 行金额（元） */
   readonly amount: number;
   readonly remark: string;
 }
@@ -97,32 +100,23 @@ export interface KingdeeSaleOutboundItem {
 export interface KingdeeSaleOutbound {
   readonly billId: string;
   readonly billNo: string;
-  /** ISO date string, e.g. "2024-01-15". */
-  readonly date: string;
+  readonly date: string; // "YYYY-MM-DD"
   readonly customerName: string;
   readonly customerId: string;
   readonly items: readonly KingdeeSaleOutboundItem[];
-  /** Total amount in yuan (float). */
+  /** 合计金额（元） */
   readonly totalAmount: number;
   readonly status: KingdeeBillStatus;
   readonly remark: string;
 }
 
 // ---------------------------------------------------------------------------
-// List query params and response
+// List query params
 // ---------------------------------------------------------------------------
 
 export interface SaleOutboundQueryParams {
-  readonly dateFrom?: string; // "YYYY-MM-DD"
-  readonly dateTo?: string;   // "YYYY-MM-DD"
-  readonly status?: KingdeeBillStatus;
+  readonly startBillDate?: string; // "YYYY-MM-DD"
+  readonly endBillDate?: string;   // "YYYY-MM-DD"
   readonly page?: number;
   readonly pageSize?: number;
-}
-
-export interface KingdeeBillListData {
-  readonly total: number;
-  readonly page: number;
-  readonly pageSize: number;
-  readonly rows: readonly RawKingdeeSaleOutbound[];
 }

@@ -1,54 +1,74 @@
 /**
  * Kingdee 云星辰 — sales outbound (销售出库单) operations.
  *
- * Covers:
- *   - Listing bills with optional date / status / pagination filters
- *   - Fetching a single bill with full line-item detail
- *   - Transforming a Kingdee bill into a Prisma DeliveryOrder create payload
+ * API paths (JDY v2):
+ *   - GET  /scm/sal_out_bound          — 查询出库单列表
+ *   - GET  /scm/sal_out_bound_detail   — 查询单张出库单详情
+ *
+ * Field naming: 金蝶云星辰使用扁平 snake_case (NOT F-prefix 旗舰版风格).
  */
 
 import { Prisma } from "@prisma/client";
 import { kingdeeRequest } from "./client";
-import {
+import type {
   KingdeeBillStatus,
-  KingdeeBillListData,
   KingdeeSaleOutbound,
   KingdeeSaleOutboundItem,
-  RawKingdeeSaleOutbound,
-  RawKingdeeItem,
+  RawSaleOutboundRow,
+  RawSaleOutboundDetail,
+  RawSaleOutboundItem,
+  SaleOutboundListData,
   SaleOutboundQueryParams,
 } from "./types";
 
 // ---------------------------------------------------------------------------
-// Internal: raw-to-domain mappers
+// Internal: raw → domain mappers
 // ---------------------------------------------------------------------------
 
-function mapRawItem(raw: RawKingdeeItem): KingdeeSaleOutboundItem {
+function mapBillStatus(raw: string): KingdeeBillStatus {
+  if (raw === "Approved" || raw === "已审核") return "Approved";
+  if (raw === "Voided" || raw === "已作废") return "Voided";
+  return "Draft";
+}
+
+function mapRawItem(raw: RawSaleOutboundItem): KingdeeSaleOutboundItem {
   return {
-    materialId: raw.FMaterialId,
-    materialName: raw.FMaterialName,
-    spec: raw.FSpecification ?? "",
-    unit: raw.FUnitName,
-    qty: raw.FRealQty,
-    price: raw.FTaxPrice,
-    amount: raw.FAmount,
-    remark: raw.FNote ?? "",
+    materialId: raw.material_id,
+    materialName: raw.material_name ?? raw.material_number ?? "",
+    unit: raw.unit_name ?? raw.unit_number ?? "",
+    qty: raw.qty,
+    price: raw.price,
+    taxPrice: raw.tax_price ?? raw.price,
+    amount: raw.all_amount ?? raw.amount ?? raw.price * raw.qty,
+    remark: raw.comment ?? "",
   };
 }
 
-function mapRawBill(raw: RawKingdeeSaleOutbound): KingdeeSaleOutbound {
+function mapDetailToDomain(raw: RawSaleOutboundDetail): KingdeeSaleOutbound {
   return {
-    billId: raw.FBillId,
-    billNo: raw.FBillNo,
-    date: raw.FDate,
-    customerName: raw.FCustName,
-    customerId: raw.FCustId,
-    items: (raw.FEntity ?? []).map(mapRawItem),
-    totalAmount: raw.FAllAmount,
-    // Fall back to Draft if the API returns an unexpected status code.
-    status:
-      (raw.FDocumentStatus as KingdeeBillStatus) ?? KingdeeBillStatus.Draft,
-    remark: raw.FNote ?? "",
+    billId: raw.id,
+    billNo: raw.bill_no,
+    date: raw.bill_date,
+    customerName: raw.customer_name ?? "",
+    customerId: raw.customer_id,
+    items: (raw.material_entity ?? []).map(mapRawItem),
+    totalAmount: raw.all_amount ?? raw.total_amount ?? 0,
+    status: mapBillStatus(raw.bill_status),
+    remark: raw.remark ?? "",
+  };
+}
+
+function mapRowToDomain(row: RawSaleOutboundRow): KingdeeSaleOutbound {
+  return {
+    billId: row.id,
+    billNo: row.bill_no,
+    date: row.bill_date,
+    customerName: row.customer_name ?? "",
+    customerId: row.customer_id,
+    items: [], // 列表查询不含明细行
+    totalAmount: row.all_amount ?? row.total_amount ?? 0,
+    status: mapBillStatus(row.bill_status),
+    remark: row.remark ?? "",
   };
 }
 
@@ -57,30 +77,29 @@ function mapRawBill(raw: RawKingdeeSaleOutbound): KingdeeSaleOutbound {
 // ---------------------------------------------------------------------------
 
 /**
- * Query the sales outbound bill list with optional filters.
+ * 查询销售出库单列表 (GET /scm/sal_out_bound)。
  *
- * @returns Array of domain-shaped bills (without full item detail).
+ * 参数通过 query string 传递（金蝶云星辰 GET 接口规范）。
  */
 export async function querySaleOutboundList(
   params: SaleOutboundQueryParams = {},
 ): Promise<readonly KingdeeSaleOutbound[]> {
-  const { dateFrom, dateTo, status, page = 1, pageSize = 50 } = params;
+  const { startBillDate, endBillDate, page = 1, pageSize = 50 } = params;
 
-  const body: Record<string, unknown> = {
-    page,
-    pageSize,
-    ...(dateFrom ? { dateFrom } : {}),
-    ...(dateTo ? { dateTo } : {}),
-    ...(status ? { status } : {}),
+  const queryParams: Record<string, string> = {
+    page: String(page),
+    page_size: String(Math.min(pageSize, 100)),
   };
+  if (startBillDate) queryParams.start_bill_date = startBillDate;
+  if (endBillDate) queryParams.end_bill_date = endBillDate;
 
-  const data = await kingdeeRequest<KingdeeBillListData>(
-    "POST",
-    "/jdyconnector/app_management/api/scm/saleoutbound/list",
-    body,
+  const data = await kingdeeRequest<SaleOutboundListData>(
+    "GET",
+    "/scm/sal_out_bound",
+    { params: queryParams },
   );
 
-  return data.rows.map(mapRawBill);
+  return data.rows.map(mapRowToDomain);
 }
 
 // ---------------------------------------------------------------------------
@@ -88,29 +107,43 @@ export async function querySaleOutboundList(
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch a single sales outbound bill by its Kingdee bill ID, including
- * full line-item detail.
+ * 查询单张销售出库单详情 (GET /scm/sal_out_bound_detail)。
+ *
+ * @param billId 金蝶内部单据 ID
  */
 export async function querySaleOutboundDetail(
   billId: string,
 ): Promise<KingdeeSaleOutbound> {
-  const data = await kingdeeRequest<RawKingdeeSaleOutbound>(
-    "POST",
-    "/jdyconnector/app_management/api/scm/saleoutbound/detail",
-    { billId },
+  const data = await kingdeeRequest<RawSaleOutboundDetail>(
+    "GET",
+    "/scm/sal_out_bound_detail",
+    { params: { id: billId } },
   );
 
-  return mapRawBill(data);
+  return mapDetailToDomain(data);
+}
+
+/**
+ * 按单据编号查询出库单详情。
+ *
+ * @param billNo 金蝶单据编号（如 CKCK240001）
+ */
+export async function querySaleOutboundByNo(
+  billNo: string,
+): Promise<KingdeeSaleOutbound> {
+  const data = await kingdeeRequest<RawSaleOutboundDetail>(
+    "GET",
+    "/scm/sal_out_bound_detail",
+    { params: { number: billNo } },
+  );
+
+  return mapDetailToDomain(data);
 }
 
 // ---------------------------------------------------------------------------
 // Yuan → fen conversion
 // ---------------------------------------------------------------------------
 
-/**
- * Convert a yuan (元) float to integer fen (分).
- * Uses Math.round to avoid IEEE-754 floating-point drift.
- */
 function yuanToFen(yuan: number): bigint {
   return BigInt(Math.round(yuan * 100));
 }
@@ -120,22 +153,16 @@ function yuanToFen(yuan: number): bigint {
 // ---------------------------------------------------------------------------
 
 /**
- * Generate a CQ-YYYYMMDD-XXX order number from a Kingdee bill.
- *
- * The suffix is derived from the last 3 characters of the Kingdee bill
- * number to keep it deterministic and short. If the bill number is shorter,
- * we zero-pad on the left.
+ * 从金蝶单号生成 CQ-YYYYMMDD-XXX 内部订单号。
  */
 function buildOrderNo(bill: KingdeeSaleOutbound): string {
-  const datePart = bill.date.replace(/-/g, ""); // "YYYYMMDD"
+  const datePart = bill.date.replace(/-/g, "");
   const suffix = bill.billNo.slice(-3).padStart(3, "0");
   return `CQ-${datePart}-${suffix}`;
 }
 
 /**
- * Build the `DeliveryItemCreateManyOrderInput[]` array for a bill's line
- * items. Exported so that the sync layer can reuse it in update operations
- * without having to unwrap the opaque nested-write type on the create payload.
+ * 构建 DeliveryItem createMany 数据。
  */
 export function buildItemsCreateData(
   bill: KingdeeSaleOutbound,
@@ -143,22 +170,18 @@ export function buildItemsCreateData(
   return bill.items.map((item) => ({
     kdMaterialId: item.materialId,
     productName: item.materialName,
-    spec: item.spec || null,
+    spec: null,
     unit: item.unit,
     quantity: new Prisma.Decimal(item.qty),
-    unitPrice: yuanToFen(item.price),
+    unitPrice: yuanToFen(item.taxPrice),
     amount: yuanToFen(item.amount),
     remark: item.remark || null,
   }));
 }
 
 /**
- * Transform a Kingdee sales outbound bill into a Prisma DeliveryOrder
- * `create` input payload.
- *
- * Monetary amounts are converted from yuan (float) to fen (BigInt).
- * The returned shape matches `Prisma.DeliveryOrderCreateInput` so it can
- * be passed directly to `prisma.deliveryOrder.create({ data: ... })`.
+ * 将金蝶出库单映射为 Prisma DeliveryOrder create payload。
+ * 金额从元转分。
  */
 export function mapKingdeeToDeliveryOrder(
   bill: KingdeeSaleOutbound,

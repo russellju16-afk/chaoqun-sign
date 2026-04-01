@@ -1,11 +1,9 @@
 /**
  * POST /api/webhook/callback
- * Kingdee status-update callback — receives bill lifecycle events
- * (approved, cancelled, etc.) and mirrors them to the corresponding
- * DeliveryOrder status.
+ * 金蝶/莱运 状态回调 — 接收单据状态变更事件并同步到 DeliveryOrder。
  *
- * Security: same HMAC-SHA256 mechanism as the inbound order webhook,
- * using the LAIYUN_WEBHOOK_SECRET env var.
+ * Security: HMAC-SHA256 via `x-webhook-signature` header.
+ * Secret:   LAIYUN_WEBHOOK_SECRET env var.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -20,27 +18,22 @@ import { OrderStatus } from "@prisma/client";
 // Request schema
 // ---------------------------------------------------------------------------
 
-/**
- * Kingdee bill status values we care about.
- * Unknown values are logged and ignored rather than causing errors.
- */
 const KdStatusSchema = z.enum([
-  "APPROVED",   // 审核通过
-  "CANCELLED",  // 已取消/作废
-  "REJECTED",   // 审核拒绝
-  "PENDING",    // 待审核 / reset
+  "Approved",   // 已审核
+  "Voided",     // 已作废
+  "Draft",      // 草稿（反审核回草稿）
 ]);
 
 const CallbackSchema = z.object({
-  /** Kingdee internal bill ID — matches kdBillId on DeliveryOrder. */
+  /** 金蝶内部单据 ID。 */
   kdBillId: z.string().min(1),
-  /** Kingdee human-readable bill number (optional; used for logging). */
+  /** 金蝶单据编号（可选，用于日志）。 */
   kdBillNo: z.string().optional(),
-  /** New status reported by Kingdee. */
+  /** 新状态。 */
   status: KdStatusSchema,
-  /** ISO timestamp of the event from Kingdee. */
+  /** 事件时间（可选）。 */
   eventTime: z.string().optional(),
-  /** Free-form note or reason attached to the status change. */
+  /** 备注（可选）。 */
   remark: z.string().optional(),
 });
 
@@ -50,15 +43,10 @@ type CallbackInput = z.infer<typeof CallbackSchema>;
 // Status mapping
 // ---------------------------------------------------------------------------
 
-/** Map Kingdee bill status → DeliveryOrder status. */
-const STATUS_MAP: Record<
-  z.infer<typeof KdStatusSchema>,
-  OrderStatus | null
-> = {
-  APPROVED: OrderStatus.PENDING,   // Bill approved — order stays PENDING (awaiting delivery)
-  CANCELLED: OrderStatus.CANCELLED,
-  REJECTED: OrderStatus.CANCELLED, // Rejected at Kingdee = treat as cancelled here
-  PENDING: null,                    // Reset to pending — no-op for delivery side
+const STATUS_MAP: Record<z.infer<typeof KdStatusSchema>, OrderStatus | null> = {
+  Approved: OrderStatus.PENDING,   // 审核通过 → 等待送货签收
+  Voided: OrderStatus.CANCELLED,   // 已作废 → 取消
+  Draft: null,                     // 反审核回草稿 → 不处理
 };
 
 // ---------------------------------------------------------------------------
@@ -74,7 +62,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return serverError("Webhook secret not configured.");
   }
 
-  // --- 1. Raw body + HMAC verification ---
   const rawBody = await req.text();
 
   const signature = req.headers.get("x-webhook-signature") ?? "";
@@ -93,7 +80,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return forbidden("Invalid webhook signature.");
   }
 
-  // --- 2. Parse body ---
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawBody);
@@ -111,17 +97,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const input: CallbackInput = parseResult.data;
 
   console.info(
-    `[webhook/callback] Received Kingdee callback for bill ${input.kdBillNo ?? input.kdBillId}: status=${input.status} eventTime=${input.eventTime ?? "-"}`,
+    `[webhook/callback] Received callback for bill ${input.kdBillNo ?? input.kdBillId}: status=${input.status}`,
   );
 
-  // --- 3. Determine the target DeliveryOrder status ---
   const targetStatus = STATUS_MAP[input.status];
   if (targetStatus === null) {
-    // No DB change needed — acknowledge receipt only.
     return NextResponse.json({ ok: true, updated: false });
   }
 
-  // --- 4. Find and update the order ---
   try {
     const existing = await prisma.deliveryOrder.findFirst({
       where: { kdBillId: input.kdBillId },
@@ -129,22 +112,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
 
     if (!existing) {
-      // Bill not in our system yet — could arrive before the order webhook.
-      // Log and acknowledge; no error.
       console.warn(
         `[webhook/callback] DeliveryOrder for kdBillId=${input.kdBillId} not found; ignoring.`,
       );
       return NextResponse.json({ ok: true, updated: false });
     }
 
-    // Avoid overwriting a terminal status (SIGNED / CANCELLED) with a stale callback.
+    // 终态保护：已签收/已取消的订单不被覆盖。
     const terminalStatuses: OrderStatus[] = [
       OrderStatus.SIGNED,
       OrderStatus.CANCELLED,
     ];
     if (terminalStatuses.includes(existing.status)) {
       console.info(
-        `[webhook/callback] Order ${existing.orderNo} is already in terminal status ${existing.status}; skipping update.`,
+        `[webhook/callback] Order ${existing.orderNo} is in terminal status ${existing.status}; skipping.`,
       );
       return NextResponse.json({ ok: true, updated: false });
     }
@@ -155,10 +136,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
 
     console.info(
-      `[webhook/callback] Updated order ${existing.orderNo} status: ${existing.status} → ${targetStatus}`,
+      `[webhook/callback] Updated order ${existing.orderNo}: ${existing.status} → ${targetStatus}`,
     );
 
-    return NextResponse.json({ ok: true, updated: true, orderNo: existing.orderNo });
+    return NextResponse.json({
+      ok: true,
+      updated: true,
+      orderNo: existing.orderNo,
+    });
   } catch (err) {
     console.error("[webhook/callback] Failed to update order status:", err);
     return serverError("Failed to update delivery order status.");

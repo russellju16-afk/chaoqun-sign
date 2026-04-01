@@ -4,28 +4,35 @@
  * Import from "@/lib/kingdee" for all Kingdee-related functionality.
  */
 
+// Auth (签名)
+export { buildAppSignature, buildApiSignature } from "./auth";
+export type { SignatureComponents } from "./auth";
+
 // Base client
-export { getAccessToken, kingdeeRequest } from "./client";
+export { getAppToken, kingdeeRequest } from "./client";
 
 // Types
 export type {
-  KingdeeApiResponse,
-  KingdeeTokenData,
+  KingdeeBillStatus,
   KingdeeSaleOutbound,
   KingdeeSaleOutboundItem,
-  KingdeeBillListData,
+  SaleOutboundListData,
   SaleOutboundQueryParams,
 } from "./types";
-export { KingdeeBillStatus } from "./types";
 
 // Sales outbound operations
 export {
   querySaleOutboundList,
   querySaleOutboundDetail,
+  querySaleOutboundByNo,
   mapKingdeeToDeliveryOrder,
   buildItemsCreateData,
 } from "./sales";
 
 // Sync
 export type { SyncSummary } from "./sync";
-export { syncSaleOutbound, syncRecentOutbounds } from "./sync";
+export {
+  syncSaleOutbound,
+  syncSaleOutboundByNo,
+  syncRecentOutbounds,
+} from "./sync";
