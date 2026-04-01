@@ -6,9 +6,10 @@ import { serializeBigInt } from "@/lib/serialize";
 const DEFAULT_DAYS = 30;
 const MAX_CUSTOMER_RANKING = 10;
 
-function parseDateRange(
-  params: URLSearchParams,
-): { dateFrom: Date; dateTo: Date } {
+function parseDateRange(params: URLSearchParams): {
+  dateFrom: Date;
+  dateTo: Date;
+} {
   const rawFrom = params.get("dateFrom");
   const rawTo = params.get("dateTo");
 
@@ -27,45 +28,111 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const { dateFrom, dateTo } = parseDateRange(request.nextUrl.searchParams);
   const whereRange = { deliveryDate: { gte: dateFrom, lte: dateTo } };
 
-  // Parallel fetches
-  const [overviewGroups, ordersInRange, signRecords, driverDeliveryCounts] =
-    await Promise.all([
-      prisma.deliveryOrder.groupBy({
-        by: ["status"],
-        where: whereRange,
-        _count: { _all: true },
-        _sum: { totalAmount: true },
-      }),
+  // ── 并行数据库查询（全部在数据库层聚合，避免全量加载） ──────────────────────────
+  const [
+    overviewGroups,
+    dailyGroups,
+    dailySignedGroups,
+    dailyRejectedGroups,
+    customerGroups,
+    driverDeliveryCounts,
+    driverSignedCounts,
+    signedOrdersForTime,
+    signRecords,
+    signModeOrders,
+  ] = await Promise.all([
+    // 概览：按状态分组
+    prisma.deliveryOrder.groupBy({
+      by: ["status"],
+      where: whereRange,
+      _count: { _all: true },
+      _sum: { totalAmount: true },
+    }),
 
-      prisma.deliveryOrder.findMany({
-        where: whereRange,
-        select: {
-          id: true,
-          status: true,
-          deliveryDate: true,
-          totalAmount: true,
-          customerName: true,
-          customerId: true,
-          driverId: true,
-          signRecord: { select: { signedAt: true } },
-        },
-        orderBy: { deliveryDate: "asc" },
-      }),
+    // 日趋势：按日期分组，统计总订单数和金额（一次查询同时获取）
+    prisma.deliveryOrder.groupBy({
+      by: ["deliveryDate"],
+      where: whereRange,
+      _count: { _all: true },
+      _sum: { totalAmount: true },
+      orderBy: { deliveryDate: "asc" },
+    }),
 
-      prisma.signRecord.findMany({
-        where: { order: { deliveryDate: { gte: dateFrom, lte: dateTo } } },
-        select: {
-          signedAt: true,
-          order: { select: { deliveryDate: true } },
-        },
-      }),
+    // 日趋势：按日期分组，统计已签收数
+    prisma.deliveryOrder.groupBy({
+      by: ["deliveryDate"],
+      where: { ...whereRange, status: OrderStatus.SIGNED },
+      _count: { _all: true },
+      orderBy: { deliveryDate: "asc" },
+    }),
 
-      prisma.deliveryOrder.groupBy({
-        by: ["driverId"],
-        where: { ...whereRange, driverId: { not: null } },
-        _count: { _all: true },
-      }),
-    ]);
+    // 日趋势：按日期分组，统计已拒收数
+    prisma.deliveryOrder.groupBy({
+      by: ["deliveryDate"],
+      where: { ...whereRange, status: OrderStatus.REJECTED },
+      _count: { _all: true },
+      orderBy: { deliveryDate: "asc" },
+    }),
+
+    // 客户排名：按 customerId 分组（取前 10）
+    prisma.deliveryOrder.groupBy({
+      by: ["customerId", "customerName"],
+      where: whereRange,
+      _count: { _all: true },
+      _sum: { totalAmount: true },
+      orderBy: [{ _count: { id: "desc" } }, { _sum: { totalAmount: "desc" } }],
+      take: MAX_CUSTOMER_RANKING,
+    }),
+
+    // 司机绩效：按司机分组，统计总配送数
+    prisma.deliveryOrder.groupBy({
+      by: ["driverId"],
+      where: { ...whereRange, driverId: { not: null } },
+      _count: { _all: true },
+    }),
+
+    // 司机绩效：按司机分组，统计已签收数
+    prisma.deliveryOrder.groupBy({
+      by: ["driverId"],
+      where: {
+        ...whereRange,
+        driverId: { not: null },
+        status: OrderStatus.SIGNED,
+      },
+      _count: { _all: true },
+    }),
+
+    // 司机绩效：仅查 SIGNED 订单的 deliveryDate + signRecord.signedAt，用于计算平均签收时长
+    prisma.deliveryOrder.findMany({
+      where: {
+        ...whereRange,
+        status: OrderStatus.SIGNED,
+        driverId: { not: null },
+        signRecord: { isNot: null },
+      },
+      select: {
+        driverId: true,
+        deliveryDate: true,
+        signRecord: { select: { signedAt: true } },
+      },
+    }),
+
+    // 全局平均签收时间：仅查 signRecord（不全量加载 orders）
+    prisma.signRecord.findMany({
+      where: { order: { deliveryDate: { gte: dateFrom, lte: dateTo } } },
+      select: {
+        signedAt: true,
+        order: { select: { deliveryDate: true } },
+      },
+    }),
+
+    // 签收模式分布：仅查 customerId，不加载其他字段
+    prisma.deliveryOrder.groupBy({
+      by: ["customerId"],
+      where: whereRange,
+      _count: { _all: true },
+    }),
+  ]);
 
   // ── Overview ─────────────────────────────────────────────────────────────────
   type StatusAgg = { count: number; amount: bigint };
@@ -101,59 +168,36 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     signingRate,
   };
 
-  // ── Daily trend ──────────────────────────────────────────────────────────────
-  type DayData = {
-    date: string;
-    orders: number;
-    signed: number;
-    rejected: number;
-    amount: bigint;
-  };
+  // ── Daily trend（数据库 groupBy 结果合并） ────────────────────────────────────
+  // 以 dailyGroups 为主，合并 signed/rejected 子计数
+  const signedByDay = new Map<string, number>();
+  for (const g of dailySignedGroups) {
+    signedByDay.set(g.deliveryDate.toISOString().slice(0, 10), g._count._all);
+  }
+  const rejectedByDay = new Map<string, number>();
+  for (const g of dailyRejectedGroups) {
+    rejectedByDay.set(g.deliveryDate.toISOString().slice(0, 10), g._count._all);
+  }
 
-  const dayMap = new Map<string, DayData>();
-  for (const order of ordersInRange) {
-    const key = order.deliveryDate.toISOString().slice(0, 10);
-    const prev = dayMap.get(key) ?? {
+  const dailyTrend = dailyGroups.map((g) => {
+    const key = g.deliveryDate.toISOString().slice(0, 10);
+    return {
       date: key,
-      orders: 0,
-      signed: 0,
-      rejected: 0,
-      amount: 0n,
+      orders: g._count._all,
+      signed: signedByDay.get(key) ?? 0,
+      rejected: rejectedByDay.get(key) ?? 0,
+      amount: (g._sum.totalAmount ?? 0n).toString(),
     };
-    dayMap.set(key, {
-      ...prev,
-      orders: prev.orders + 1,
-      signed: prev.signed + (order.status === OrderStatus.SIGNED ? 1 : 0),
-      rejected:
-        prev.rejected + (order.status === OrderStatus.REJECTED ? 1 : 0),
-      amount: prev.amount + order.totalAmount,
-    });
-  }
+  });
 
-  const dailyTrend = Array.from(dayMap.values())
-    .sort((a, b) => a.date.localeCompare(b.date))
-    .map((d) => ({ ...d, amount: d.amount.toString() }));
-
-  // ── Customer ranking ──────────────────────────────────────────────────────────
-  type CustomerAgg = { name: string; orders: number; amount: bigint };
-  const customerMap = new Map<string, CustomerAgg>();
-  for (const order of ordersInRange) {
-    const prev = customerMap.get(order.customerName) ?? {
-      name: order.customerName,
-      orders: 0,
-      amount: 0n,
-    };
-    customerMap.set(order.customerName, {
-      ...prev,
-      orders: prev.orders + 1,
-      amount: prev.amount + order.totalAmount,
-    });
-  }
-
-  const customerRanking = Array.from(customerMap.values())
-    .sort((a, b) => b.orders - a.orders || Number(b.amount - a.amount))
-    .slice(0, MAX_CUSTOMER_RANKING)
-    .map((c) => ({ ...c, amount: c.amount.toString() }));
+  // ── Customer ranking（数据库 groupBy 结果直接使用） ───────────────────────────
+  // Prisma groupBy 不直接支持 customerName 字段聚合展示（需要和 customerId 一起），
+  // 结果已按 _count desc 排序，直接映射
+  const customerRanking = customerGroups.map((g) => ({
+    name: g.customerName,
+    orders: g._count._all,
+    amount: (g._sum.totalAmount ?? 0n).toString(),
+  }));
 
   // ── Driver performance ────────────────────────────────────────────────────────
   const driverIds = driverDeliveryCounts
@@ -166,67 +210,58 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   });
   const driverNameMap = new Map(drivers.map((d) => [d.id, d.name]));
 
-  type DriverPerf = {
-    driverId: string;
-    driverName: string;
-    deliveries: number;
-    signed: number;
-    totalSignMs: number;
-  };
-  const driverPerfMap = new Map<string, DriverPerf>();
-  for (const g of driverDeliveryCounts) {
-    if (g.driverId === null) continue;
-    driverPerfMap.set(g.driverId, {
-      driverId: g.driverId,
-      driverName: driverNameMap.get(g.driverId) ?? "未知",
-      deliveries: g._count._all,
-      signed: 0,
-      totalSignMs: 0,
-    });
+  // 已签收数量按司机汇总（来自数据库 groupBy）
+  const driverSignedMap = new Map<string, number>();
+  for (const g of driverSignedCounts) {
+    if (g.driverId !== null) {
+      driverSignedMap.set(g.driverId, g._count._all);
+    }
   }
 
-  for (const order of ordersInRange) {
-    if (
-      order.status !== OrderStatus.SIGNED ||
-      !order.driverId ||
-      !order.signRecord
-    )
-      continue;
-    const perf = driverPerfMap.get(order.driverId);
-    if (!perf) continue;
-    const signMs = Math.max(
+  // 平均签收时长按司机汇总（仅 SIGNED 订单，有 signRecord 的子集）
+  type SignTimeAgg = { totalMs: number; count: number };
+  const driverSignTimeMap = new Map<string, SignTimeAgg>();
+  for (const order of signedOrdersForTime) {
+    if (!order.driverId || !order.signRecord) continue;
+    const ms = Math.max(
       0,
       order.signRecord.signedAt.getTime() - order.deliveryDate.getTime(),
     );
-    driverPerfMap.set(order.driverId, {
-      ...perf,
-      signed: perf.signed + 1,
-      totalSignMs: perf.totalSignMs + signMs,
+    const prev = driverSignTimeMap.get(order.driverId) ?? {
+      totalMs: 0,
+      count: 0,
+    };
+    driverSignTimeMap.set(order.driverId, {
+      totalMs: prev.totalMs + ms,
+      count: prev.count + 1,
     });
   }
 
-  const driverPerformance = Array.from(driverPerfMap.values())
-    .sort((a, b) => b.deliveries - a.deliveries)
-    .map(({ driverId, driverName, deliveries, signed, totalSignMs }) => ({
-      driverId,
-      driverName,
-      deliveries,
-      signed,
-      avgSignTimeHours:
-        signed > 0
-          ? Math.round((totalSignMs / signed / 3_600_000) * 10) / 10
-          : null,
-    }));
+  const driverPerformance = driverDeliveryCounts
+    .filter((g): g is typeof g & { driverId: string } => g.driverId !== null)
+    .map((g) => {
+      const signed = driverSignedMap.get(g.driverId) ?? 0;
+      const signTime = driverSignTimeMap.get(g.driverId);
+      return {
+        driverId: g.driverId,
+        driverName: driverNameMap.get(g.driverId) ?? "未知",
+        deliveries: g._count._all,
+        signed,
+        avgSignTimeHours:
+          signTime && signTime.count > 0
+            ? Math.round((signTime.totalMs / signTime.count / 3_600_000) * 10) /
+              10
+            : null,
+      };
+    })
+    .sort((a, b) => b.deliveries - a.deliveries);
 
-  // ── Sign mode distribution ────────────────────────────────────────────────────
-  const uniqueCustomerIds = Array.from(
-    new Set(
-      ordersInRange
-        .map((o) => o.customerId)
-        .filter((id): id is string => id !== null),
-    ),
-  );
+  // ── Sign mode distribution（数据库 groupBy，再关联 customerConfig） ────────────
+  const customerIds = signModeOrders
+    .map((g) => g.customerId)
+    .filter((id): id is string => id !== null);
 
+  const uniqueCustomerIds = Array.from(new Set(customerIds));
   const customerConfigs = await prisma.customerConfig.findMany({
     where: { id: { in: uniqueCustomerIds } },
     select: { id: true, signMode: true },
@@ -236,12 +271,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   );
 
   const signModeCount: Record<string, number> = {};
-  for (const order of ordersInRange) {
+  for (const g of signModeOrders) {
     const mode =
-      order.customerId !== null
-        ? (signModeConfigMap.get(order.customerId) ?? "UNKNOWN")
+      g.customerId !== null
+        ? (signModeConfigMap.get(g.customerId) ?? "UNKNOWN")
         : "UNKNOWN";
-    signModeCount[mode] = (signModeCount[mode] ?? 0) + 1;
+    signModeCount[mode] = (signModeCount[mode] ?? 0) + g._count._all;
   }
 
   const signModeDistribution = Object.entries(signModeCount)

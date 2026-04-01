@@ -96,12 +96,13 @@ export async function POST(
   // the update below is the only write needed.
 
   await prisma.$transaction(async (tx) => {
+    // 同时更新状态和拒收原因，避免需要额外查询 SignRecord
     await tx.deliveryOrder.update({
       where: { id: order.id },
-      data: { status: "REJECTED" },
+      data: { status: "REJECTED", rejectReason: reason },
     });
 
-    // Create an audit log entry for the rejection reason
+    // 同时写入审计日志，便于后台追溯
     await tx.auditLog.create({
       data: {
         action: "order.rejected",

@@ -5,6 +5,7 @@ import { enqueuePrintJob } from "@/lib/print/queue";
 import { serializeBigInt } from "@/lib/serialize";
 import { badRequest, notFound, serverError } from "@/lib/errors";
 import type { PrintFormat } from "@/lib/print/types";
+import { requireRole } from "@/lib/role-guard";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -27,6 +28,10 @@ export async function POST(
   request: NextRequest,
   { params }: RouteParams,
 ): Promise<NextResponse> {
+  // 写操作仅允许 ADMIN 角色
+  const roleError = await requireRole(request, ["ADMIN"]);
+  if (roleError) return roleError;
+
   const { id } = await params;
 
   // Parse + validate body (empty body is fine — all fields have defaults)
@@ -57,10 +62,11 @@ export async function POST(
     return notFound("送货单不存在");
   }
 
-  // Create a PrintJob record, then enqueue — keep these in the same try block
-  // so a queue failure does not leave a dangling QUEUED record unprocessed
+  // 先创建 DB 记录，再入队；入队失败时将记录标记为 FAILED（补偿模式），
+  // 避免留下状态永远为 QUEUED 却永远不会被处理的孤儿记录。
+  let printJob: Awaited<ReturnType<typeof prisma.printJob.create>> | undefined;
   try {
-    const printJob = await prisma.printJob.create({
+    printJob = await prisma.printJob.create({
       data: {
         orderId: id,
         printerName,
@@ -80,6 +86,22 @@ export async function POST(
     return NextResponse.json(serializeBigInt(printJob), { status: 201 });
   } catch (err: unknown) {
     console.error("[print route] failed to create/enqueue print job:", err);
+
+    // 如果 DB 记录已创建但入队失败，将其标记为 FAILED 避免成为孤儿记录
+    if (printJob !== undefined) {
+      await prisma.printJob
+        .update({
+          where: { id: printJob.id },
+          data: { status: "FAILED", error: "入队失败: " + String(err) },
+        })
+        .catch((updateErr: unknown) => {
+          console.error(
+            "[print route] failed to mark print job as FAILED:",
+            updateErr,
+          );
+        });
+    }
+
     return serverError("打印任务创建失败，请稍后重试");
   }
 }

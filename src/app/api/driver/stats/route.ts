@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { OrderStatus } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { unauthorized } from "@/lib/errors";
-import { getDriverSession } from "@/lib/driver-session";
+import { validateDriverSession } from "@/lib/driver-session";
 
 interface DriverStatsResponse {
   readonly totalOrders: number;
@@ -13,8 +13,8 @@ interface DriverStatsResponse {
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  const session = await getDriverSession();
-  if (!session.driverId) {
+  const session = await validateDriverSession();
+  if (!session) {
     return unauthorized();
   }
 

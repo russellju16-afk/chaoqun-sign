@@ -8,7 +8,7 @@ import {
   badRequest,
   serverError,
 } from "@/lib/errors";
-import { getDriverSession } from "@/lib/driver-session";
+import { validateDriverSession } from "@/lib/driver-session";
 import { generateSignToken } from "@/lib/auth";
 import { sendSignLink } from "@/lib/sms";
 
@@ -24,8 +24,8 @@ export async function POST(
   request: NextRequest,
   { params }: RouteParams,
 ): Promise<NextResponse> {
-  const session = await getDriverSession();
-  if (!session.driverId) {
+  const session = await validateDriverSession();
+  if (!session) {
     return unauthorized();
   }
 

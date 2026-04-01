@@ -3,7 +3,7 @@ import { OrderStatus } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { serializeBigInt } from "@/lib/serialize";
 import { unauthorized, forbidden, notFound, badRequest } from "@/lib/errors";
-import { getDriverSession } from "@/lib/driver-session";
+import { validateDriverSession } from "@/lib/driver-session";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -13,8 +13,8 @@ export async function POST(
   request: NextRequest,
   { params }: RouteParams,
 ): Promise<NextResponse> {
-  const session = await getDriverSession();
-  if (!session.driverId) {
+  const session = await validateDriverSession();
+  if (!session) {
     return unauthorized();
   }
 
@@ -58,6 +58,25 @@ export async function POST(
       _count: {
         select: { items: true },
       },
+    },
+  });
+
+  // 审计日志：记录状态变更（fire-and-forget，不阻塞响应）
+  void prisma.auditLog.create({
+    data: {
+      userId: null, // 司机无 AdminUser，userId 为 null
+      action: "order.deliver",
+      target: `delivery_order:${id}`,
+      detail: JSON.stringify({
+        driverId: session.driverId,
+        driverName: session.driverName,
+        orderNo: order.orderNo,
+        fromStatus: OrderStatus.PENDING,
+        toStatus: OrderStatus.DELIVERED,
+      }),
+      ipAddress:
+        request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+        "unknown",
     },
   });
 

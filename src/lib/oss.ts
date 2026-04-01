@@ -21,9 +21,22 @@ interface OssConfig {
 }
 
 function getConfig(): OssConfig {
-  const accessKeyId = process.env.ALIYUN_OSS_ACCESS_KEY_ID ?? "";
-  const accessKeySecret = process.env.ALIYUN_OSS_ACCESS_KEY_SECRET ?? "";
-  const bucket = process.env.ALIYUN_OSS_BUCKET ?? "";
+  // 在调用时校验（lazy throw），避免模块加载阶段因缺少 env 而崩溃
+  const accessKeyId = process.env.ALIYUN_OSS_ACCESS_KEY_ID;
+  if (!accessKeyId) {
+    throw new Error("缺少环境变量 ALIYUN_OSS_ACCESS_KEY_ID");
+  }
+
+  const accessKeySecret = process.env.ALIYUN_OSS_ACCESS_KEY_SECRET;
+  if (!accessKeySecret) {
+    throw new Error("缺少环境变量 ALIYUN_OSS_ACCESS_KEY_SECRET");
+  }
+
+  const bucket = process.env.ALIYUN_OSS_BUCKET;
+  if (!bucket) {
+    throw new Error("缺少环境变量 ALIYUN_OSS_BUCKET");
+  }
+
   const region = process.env.ALIYUN_OSS_REGION ?? "oss-cn-hangzhou";
   const endpoint =
     process.env.ALIYUN_OSS_ENDPOINT ??
@@ -129,9 +142,18 @@ export async function putObject(
   }
 }
 
+/** 允许上传的图片 MIME 类型白名单，防止 SVG 等含脚本的格式被上传 */
+const ALLOWED_MIME_TYPES: readonly string[] = [
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+];
+
 /**
  * Parse a data URL string ("data:<mime>;base64,<data>") into its components.
  * Returns null when the string is not a valid data URL.
+ * Throws an Error when the MIME type is not in the allowlist.
  */
 export function parseDataUrl(
   dataUrl: string,
@@ -139,5 +161,11 @@ export function parseDataUrl(
   const match = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
   if (!match) return null;
   const [, mimeType, b64] = match;
+
+  // MIME 白名单校验，拒绝 image/svg+xml 等可能携带 XSS 的格式
+  if (!ALLOWED_MIME_TYPES.includes(mimeType)) {
+    throw new Error("不支持的图片格式");
+  }
+
   return { mimeType, buffer: Buffer.from(b64, "base64") };
 }

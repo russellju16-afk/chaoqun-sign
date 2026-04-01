@@ -5,6 +5,7 @@ import { enqueuePrintJob } from "@/lib/print/queue";
 import { serializeBigInt } from "@/lib/serialize";
 import { badRequest, serverError } from "@/lib/errors";
 import type { PrintFormat } from "@/lib/print/types";
+import { requireRole } from "@/lib/role-guard";
 
 const MAX_BATCH = 50;
 
@@ -27,6 +28,10 @@ const batchPrintSchema = z.object({
  * Returns { created: number, jobs: [...] }
  */
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  // 写操作仅允许 ADMIN 角色
+  const roleError = await requireRole(request, ["ADMIN"]);
+  if (roleError) return roleError;
+
   let body: unknown;
   try {
     body = await request.json();

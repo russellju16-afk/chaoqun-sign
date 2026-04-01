@@ -5,6 +5,7 @@ import { prisma } from "@/lib/db";
 import { generateSignToken } from "@/lib/auth";
 import { sendSignLink } from "@/lib/sms";
 import { badRequest, serverError } from "@/lib/errors";
+import { requireRole } from "@/lib/role-guard";
 
 const MAX_BATCH = 50;
 
@@ -41,6 +42,10 @@ interface BatchSmsResponse {
  * Returns { sent, skipped, errors, details }
  */
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  // 写操作仅允许 ADMIN 角色
+  const roleError = await requireRole(request, ["ADMIN"]);
+  if (roleError) return roleError;
+
   let body: unknown;
   try {
     body = await request.json();
@@ -71,7 +76,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   const appBaseUrl =
-    process.env.NEXT_PUBLIC_APP_URL ?? process.env.APP_URL ?? "http://localhost:3000";
+    process.env.NEXT_PUBLIC_APP_URL ??
+    process.env.APP_URL ??
+    "http://localhost:3000";
 
   const details: SmsDetail[] = [];
   let sent = 0;

@@ -46,29 +46,25 @@ async function upsertBill(
   bill: Awaited<ReturnType<typeof querySaleOutboundDetail>>,
 ): Promise<DeliveryOrder> {
   const payload = mapKingdeeToDeliveryOrder(bill);
+  const deliveryDate = new Date(`${bill.date}T00:00:00+08:00`);
 
-  const existing = await prisma.deliveryOrder.findFirst({
+  // 使用原子 upsert，以 kdBillId 唯一约束为 key，避免并发时 findFirst+create 竞态
+  return prisma.deliveryOrder.upsert({
     where: { kdBillId: bill.billId },
-    select: { id: true },
-  });
-
-  if (existing) {
-    return prisma.deliveryOrder.update({
-      where: { id: existing.id },
-      data: {
-        kdBillNo: bill.billNo,
-        customerName: bill.customerName,
-        totalAmount: payload.totalAmount,
-        deliveryDate: new Date(`${bill.date}T00:00:00+08:00`),
-        items: {
-          deleteMany: {},
-          createMany: { data: buildItemsCreateData(bill) },
-        },
+    // 更新时：只更新元数据和明细，不覆盖 status 和 orderNo
+    update: {
+      kdBillNo: bill.billNo,
+      customerName: bill.customerName,
+      totalAmount: payload.totalAmount,
+      deliveryDate,
+      items: {
+        deleteMany: {}, // 先清空旧明细
+        createMany: { data: buildItemsCreateData(bill) }, // 再重建
       },
-    });
-  }
-
-  return prisma.deliveryOrder.create({ data: payload });
+    },
+    // 创建时：使用完整 payload（含 orderNo、status 等）
+    create: payload,
+  });
 }
 
 // ---------------------------------------------------------------------------

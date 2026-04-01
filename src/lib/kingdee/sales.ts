@@ -79,27 +79,43 @@ function mapRowToDomain(row: RawSaleOutboundRow): KingdeeSaleOutbound {
 /**
  * 查询销售出库单列表 (GET /scm/sal_out_bound)。
  *
+ * 自动分页：每次请求 pageSize=100，直到返回条数小于 pageSize 或达到安全上限。
  * 参数通过 query string 传递（金蝶云星辰 GET 接口规范）。
  */
 export async function querySaleOutboundList(
   params: SaleOutboundQueryParams = {},
 ): Promise<readonly KingdeeSaleOutbound[]> {
-  const { startBillDate, endBillDate, page = 1, pageSize = 50 } = params;
+  const { startBillDate, endBillDate } = params;
+  const PAGE_SIZE = 100; // 每页固定 100 条
+  const MAX_PAGES = 50; // 安全上限，防止无限循环
 
-  const queryParams: Record<string, string> = {
-    page: String(page),
-    page_size: String(Math.min(pageSize, 100)),
+  const baseParams: Record<string, string> = {
+    page_size: String(PAGE_SIZE),
   };
-  if (startBillDate) queryParams.start_bill_date = startBillDate;
-  if (endBillDate) queryParams.end_bill_date = endBillDate;
+  if (startBillDate) baseParams.start_bill_date = startBillDate;
+  if (endBillDate) baseParams.end_bill_date = endBillDate;
 
-  const data = await kingdeeRequest<SaleOutboundListData>(
-    "GET",
-    "/scm/sal_out_bound",
-    { params: queryParams },
-  );
+  const allRows: KingdeeSaleOutbound[] = [];
 
-  return data.rows.map(mapRowToDomain);
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const queryParams = { ...baseParams, page: String(page) };
+
+    const data = await kingdeeRequest<SaleOutboundListData>(
+      "GET",
+      "/scm/sal_out_bound",
+      { params: queryParams },
+    );
+
+    const rows = data.rows ?? [];
+    allRows.push(...rows.map(mapRowToDomain));
+
+    // 返回条数不足一页，说明已到最后一页
+    if (rows.length < PAGE_SIZE) {
+      break;
+    }
+  }
+
+  return allRows;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +161,11 @@ export async function querySaleOutboundByNo(
 // ---------------------------------------------------------------------------
 
 function yuanToFen(yuan: number): bigint {
-  return BigInt(Math.round(yuan * 100));
+  // 用字符串避免浮点精度问题（如 1.1 * 100 = 110.00000000000001）
+  const str = yuan.toFixed(2);
+  const [intPart, decPart = "00"] = str.split(".");
+  const padded = decPart.padEnd(2, "0").slice(0, 2);
+  return BigInt(intPart + padded);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 import { getIronSession, type SessionOptions } from "iron-session";
 import { cookies } from "next/headers";
+import { prisma } from "@/lib/db";
 
 export interface DriverSessionData {
   driverId: string;
@@ -50,4 +51,28 @@ export const driverSessionOptions: SessionOptions = {
 export async function getDriverSession() {
   const cookieStore = await cookies();
   return getIronSession<DriverSessionData>(cookieStore, driverSessionOptions);
+}
+
+/**
+ * 验证司机 session 并检查数据库中的 isActive 状态。
+ * 若司机已被停用，销毁 session 并返回 null。
+ * 返回 null 表示鉴权失败，需要返回 401。
+ */
+export async function validateDriverSession() {
+  const session = await getDriverSession();
+  if (!session?.driverId) return null;
+
+  // 查询数据库确认司机仍处于激活状态
+  const driver = await prisma.driver.findUnique({
+    where: { id: session.driverId },
+    select: { isActive: true },
+  });
+
+  if (!driver?.isActive) {
+    // 司机已被停用，销毁 session 阻止继续使用
+    await session.destroy();
+    return null;
+  }
+
+  return session;
 }

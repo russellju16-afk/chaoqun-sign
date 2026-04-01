@@ -64,20 +64,22 @@ async function resolveCustomer(
   customerName: string,
   customerPhone: string | undefined,
 ): Promise<string> {
-  // Attempt to find an existing config by name (case-insensitive exact match).
-  const existing = await prisma.customerConfig.findFirst({
-    where: { customerName: { equals: customerName, mode: "insensitive" } },
-    select: { id: true },
-  });
-  if (existing) return existing.id;
-
-  // Create a minimal placeholder config; the admin can refine it later.
-  const created = await prisma.customerConfig.create({
-    data: {
+  // 使用 upsert 替代 findFirst + create，消除并发请求下的竞态条件。
+  // kdCustomerId 使用稳定的 `laiyun-{customerName}` 格式（去掉 Date.now()），
+  // 确保同一客户名始终映射到同一唯一键，避免重复创建占位记录。
+  const record = await prisma.customerConfig.upsert({
+    where: {
+      kdCustomerId: `laiyun-${customerName}`,
+    },
+    update: {
+      // 如果记录已存在，仅在 contactPhone 有新值时更新（不覆盖管理员手动设置的值）
+      ...(customerPhone ? { contactPhone: customerPhone } : {}),
+    },
+    create: {
       // We don't have the real 金蝶 customer ID here; use a synthetic key so
       // the unique constraint is satisfied.  Prefix ensures no collision with
       // real IDs from Kingdee.
-      kdCustomerId: `laiyun-${customerName}-${Date.now()}`,
+      kdCustomerId: `laiyun-${customerName}`,
       customerName,
       contactPhone: customerPhone,
       signMode: SignMode.DIGITAL,
@@ -86,7 +88,7 @@ async function resolveCustomer(
     },
     select: { id: true },
   });
-  return created.id;
+  return record.id;
 }
 
 /** Resolve a driver by name (case-insensitive). Returns null if not found. */
@@ -202,8 +204,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           customerConfig.signMode === SignMode.BOTH);
 
       if (needsPrint) {
-        const printerName =
-          process.env.DEFAULT_PRINTER_NAME ?? "default";
+        const printerName = process.env.DEFAULT_PRINTER_NAME ?? "default";
         await tx.printJob.create({
           data: {
             orderId: created.id,

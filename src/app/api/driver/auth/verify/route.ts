@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db";
 import { verifyCode } from "@/lib/verification-code";
 import { getDriverSession } from "@/lib/driver-session";
 import { badRequest, unauthorized, serverError } from "@/lib/errors";
+import { getRedis } from "@/lib/redis";
 
 const verifySchema = z.object({
   phone: z
@@ -26,11 +27,32 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const { phone, code } = parsed.data;
 
+    // 暴力破解防护：每个手机号每个验证码最多允许 5 次尝试，TTL 与验证码同周期（5 分钟）
+    const redis = getRedis();
+    const attemptsKey = `verify_attempts:${phone}`;
+    const attempts = await redis.incr(attemptsKey);
+    if (attempts === 1) {
+      // 第一次计数时设置 5 分钟 TTL，与验证码生命周期保持一致
+      await redis.expire(attemptsKey, 5 * 60);
+    }
+    if (attempts > 5) {
+      return NextResponse.json(
+        {
+          error: "TOO_MANY_ATTEMPTS",
+          message: "验证次数过多，请重新获取验证码",
+        },
+        { status: 429 },
+      );
+    }
+
     // Verify the code from Redis first
     const codeValid = await verifyCode(phone, code);
     if (!codeValid) {
       return unauthorized("验证码错误或已过期");
     }
+
+    // 验证成功后删除计数器
+    await redis.del(attemptsKey);
 
     // Fetch the driver after code verification
     const driver = await prisma.driver.findUnique({

@@ -43,7 +43,7 @@ model CustomerConfig {
 model DeliveryOrder {
   id              String      @id @default(cuid())
   orderNo         String      @unique @map("order_no") // 送货单号
-  kdBillId        String?     @map("kd_bill_id") // 金蝶销售出库单 ID
+  kdBillId        String?     @unique @map("kd_bill_id") // 金蝶销售出库单 ID（唯一约束供 upsert 使用）
   kdBillNo        String?     @map("kd_bill_no") // 金蝶单号
 
   // 客户信息
@@ -65,6 +65,9 @@ model DeliveryOrder {
   signToken       String?     @unique @map("sign_token")
   signTokenExpiry DateTime?   @map("sign_token_expiry")
 
+  // 拒收原因（REJECTED 状态时写入）
+  rejectReason    String?     @map("reject_reason")
+
   // 时间
   deliveryDate    DateTime    @map("delivery_date")
   createdAt       DateTime    @default(now())
@@ -77,6 +80,9 @@ model DeliveryOrder {
   @@index([kdBillNo])
   @@index([status])
   @@index([deliveryDate])
+  @@index([customerId])                // 按客户查询订单
+  @@index([driverId])                  // 按司机查询订单
+  @@index([status, deliveryDate])      // 复合索引：按状态+日期过滤
   @@map("delivery_order")
 }
 
@@ -95,6 +101,7 @@ model DeliveryItem {
   amount          BigInt   // 金额（分）
   remark          String?
 
+  @@index([orderId]) // 按订单 ID 查询明细
   @@map("delivery_item")
 }
 
@@ -130,6 +137,8 @@ model PrintJob {
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
+  @@index([orderId])            // 按订单查打印任务
+  @@index([status, createdAt]) // 复合索引：按状态+时间过滤
   @@map("print_job")
 }
 
@@ -162,6 +171,8 @@ model AuditLog {
 
   @@index([action])
   @@index([createdAt])
+  @@index([target])            // 按目标资源查审计日志
+  @@index([userId, createdAt]) // 复合索引：按用户+时间查操作记录
   @@map("audit_log")
 }
 

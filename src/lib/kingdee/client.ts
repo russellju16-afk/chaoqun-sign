@@ -73,6 +73,9 @@ let tokenCache: TokenCache | null = null;
 const TOKEN_TTL_MS = 24 * 3600 * 1000;
 const TOKEN_REFRESH_BUFFER_MS = 3600 * 1000;
 
+/** 防并发刷新：正在进行中的 token 请求 Promise，避免多个请求同时触发 fetchAppToken。 */
+let pendingTokenRefresh: Promise<string> | null = null;
+
 function isCacheValid(cache: TokenCache): boolean {
   return Date.now() - cache.obtainedAt < TOKEN_TTL_MS - TOKEN_REFRESH_BUFFER_MS;
 }
@@ -124,12 +127,27 @@ async function fetchAppToken(): Promise<TokenCache> {
 // ---------------------------------------------------------------------------
 
 export async function getAppToken(): Promise<string> {
+  // 缓存命中：直接返回，无需网络请求
   if (tokenCache !== null && isCacheValid(tokenCache)) {
     return tokenCache.appToken;
   }
-  const fresh = await fetchAppToken();
-  tokenCache = fresh;
-  return fresh.appToken;
+
+  // 已有正在进行的刷新请求：复用同一个 Promise，避免并发踩踏
+  if (pendingTokenRefresh !== null) {
+    return pendingTokenRefresh;
+  }
+
+  // 发起新的刷新请求，并在完成后清除 pending 标记
+  pendingTokenRefresh = fetchAppToken()
+    .then((fresh) => {
+      tokenCache = fresh;
+      return fresh.appToken;
+    })
+    .finally(() => {
+      pendingTokenRefresh = null;
+    });
+
+  return pendingTokenRefresh;
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +221,12 @@ export async function kingdeeRequest<T>(
 
   const response = await fetch(fullUrl.toString(), init);
 
-  let result: { errcode?: number; description?: string; description_cn?: string; data?: T };
+  let result: {
+    errcode?: number;
+    description?: string;
+    description_cn?: string;
+    data?: T;
+  };
   try {
     result = (await response.json()) as typeof result;
   } catch {

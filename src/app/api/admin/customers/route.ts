@@ -4,6 +4,8 @@ import { SignMode } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { parsePagination, buildPaginatedResponse } from "@/lib/pagination";
 import { serializeBigInt } from "@/lib/serialize";
+import { requireRole } from "@/lib/role-guard";
+import { getSession } from "@/lib/session";
 
 const createCustomerSchema = z.object({
   kdCustomerId: z.string().min(1, "金蝶客户 ID 不能为空"),
@@ -33,6 +35,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  // 写操作仅允许 ADMIN 角色
+  const roleError = await requireRole(request, ["ADMIN"]);
+  if (roleError) return roleError;
+
+  // 获取当前登录用户（用于审计日志，requireRole 已保证此处 session 有效）
+  const adminSession = await getSession();
+
   let body: unknown;
   try {
     body = await request.json();
@@ -77,6 +86,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       ...(parsed.data.autoPrint !== undefined
         ? { autoPrint: parsed.data.autoPrint }
         : {}),
+    },
+  });
+
+  // 审计日志：记录客户创建（fire-and-forget，不阻塞响应）
+  void prisma.auditLog.create({
+    data: {
+      userId: adminSession.userId,
+      action: "customer.create",
+      target: `customer_config:${customer.id}`,
+      detail: JSON.stringify({
+        kdCustomerId: customer.kdCustomerId,
+        customerName: customer.customerName,
+      }),
+      ipAddress:
+        request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+        "unknown",
     },
   });
 

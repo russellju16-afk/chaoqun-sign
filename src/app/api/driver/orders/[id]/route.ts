@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { serializeBigInt } from "@/lib/serialize";
 import { unauthorized, forbidden, notFound } from "@/lib/errors";
-import { getDriverSession } from "@/lib/driver-session";
+import { validateDriverSession } from "@/lib/driver-session";
 import { generateViewUrl } from "@/lib/oss";
 
 interface RouteParams {
@@ -13,8 +13,8 @@ export async function GET(
   request: NextRequest,
   { params }: RouteParams,
 ): Promise<NextResponse> {
-  const session = await getDriverSession();
-  if (!session.driverId) {
+  const session = await validateDriverSession();
+  if (!session) {
     return unauthorized();
   }
 

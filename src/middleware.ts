@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { unsealData } from "iron-session";
 import { SESSION_COOKIE_NAME, type SessionData } from "@/lib/session";
+import {
+  DRIVER_SESSION_COOKIE_NAME,
+  type DriverSessionData,
+} from "@/lib/driver-session";
 
 // ---------------------------------------------------------------------------
 // Security headers applied to every response
@@ -53,7 +57,8 @@ const EDGE_WINDOW_SECONDS = 60;
  */
 function checkEdgeRateLimit(ip: string): boolean {
   const nowSeconds = Math.floor(Date.now() / 1000);
-  const windowStart = Math.floor(nowSeconds / EDGE_WINDOW_SECONDS) * EDGE_WINDOW_SECONDS;
+  const windowStart =
+    Math.floor(nowSeconds / EDGE_WINDOW_SECONDS) * EDGE_WINDOW_SECONDS;
 
   const existing = windowMap.get(ip);
 
@@ -100,7 +105,7 @@ const ADMIN_PUBLIC_PATHS: readonly string[] = ["/admin/login"];
 const PUBLIC_API_PREFIXES: readonly string[] = [
   "/api/admin/auth/", // login, logout, me — handled below with finer logic
   "/api/sign/",
-  "/api/driver/",
+  "/api/driver/auth/", // 司机登录相关路由放行（send-code / verify）
 ];
 
 /**
@@ -127,9 +132,7 @@ function isAdminUiPath(pathname: string): boolean {
 // Session extraction (Edge-compatible — no next/headers)
 // ---------------------------------------------------------------------------
 
-async function getSessionData(
-  req: NextRequest,
-): Promise<SessionData | null> {
+async function getSessionData(req: NextRequest): Promise<SessionData | null> {
   const cookie = req.cookies.get(SESSION_COOKIE_NAME);
   if (!cookie?.value) return null;
 
@@ -152,6 +155,39 @@ async function getSessionData(
     return null;
   } catch {
     // Corrupted or tampered cookie — treat as no session
+    return null;
+  }
+}
+
+/**
+ * Edge-compatible 司机 session 解析，使用独立的 driver cookie。
+ * 与 getSessionData 结构相同但针对 DriverSessionData 类型校验。
+ */
+async function getDriverSessionData(
+  req: NextRequest,
+): Promise<DriverSessionData | null> {
+  const cookie = req.cookies.get(DRIVER_SESSION_COOKIE_NAME);
+  if (!cookie?.value) return null;
+
+  const password = process.env.SESSION_SECRET;
+  if (!password) return null;
+
+  try {
+    const data = await unsealData<Partial<DriverSessionData>>(cookie.value, {
+      password,
+    });
+
+    // 校验 session 数据结构是否完整
+    if (
+      typeof data.driverId === "string" &&
+      typeof data.driverName === "string" &&
+      typeof data.phone === "string"
+    ) {
+      return data as DriverSessionData;
+    }
+    return null;
+  } catch {
+    // Cookie 损坏或被篡改，视为无 session
     return null;
   }
 }
@@ -203,6 +239,22 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
     pathname.startsWith("/_next/") ||
     pathname.startsWith("/favicon")
   ) {
+    return withSecurityHeaders(NextResponse.next());
+  }
+
+  // -------------------------------------------------------------------------
+  // Protected /api/driver/* (excluding /api/driver/auth/* which is in PUBLIC_API_PREFIXES)
+  // -------------------------------------------------------------------------
+  if (pathname.startsWith("/api/driver/")) {
+    const driverSession = await getDriverSessionData(req);
+    if (!driverSession) {
+      return withSecurityHeaders(
+        NextResponse.json(
+          { error: "UNAUTHORIZED", message: "未登录或会话已过期" },
+          { status: 401 },
+        ),
+      );
+    }
     return withSecurityHeaders(NextResponse.next());
   }
 

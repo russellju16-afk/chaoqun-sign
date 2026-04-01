@@ -3,6 +3,8 @@ import { z } from "zod";
 import { SignMode } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { serializeBigInt } from "@/lib/serialize";
+import { requireRole } from "@/lib/role-guard";
+import { getSession } from "@/lib/session";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -38,6 +40,13 @@ export async function PUT(
   request: NextRequest,
   { params }: RouteParams,
 ): Promise<NextResponse> {
+  // 写操作仅允许 ADMIN 角色
+  const roleError = await requireRole(request, ["ADMIN"]);
+  if (roleError) return roleError;
+
+  // 获取当前登录用户（用于审计日志）
+  const adminSession = await getSession();
+
   const { id } = await params;
 
   const existing = await prisma.customerConfig.findUnique({ where: { id } });
@@ -81,6 +90,22 @@ export async function PUT(
       ...(parsed.data.autoPrint !== undefined
         ? { autoPrint: parsed.data.autoPrint }
         : {}),
+    },
+  });
+
+  // 审计日志：记录客户配置修改（fire-and-forget，不阻塞响应）
+  void prisma.auditLog.create({
+    data: {
+      userId: adminSession.userId,
+      action: "customer.update",
+      target: `customer_config:${id}`,
+      detail: JSON.stringify({
+        customerName: existing.customerName,
+        changes: parsed.data,
+      }),
+      ipAddress:
+        request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+        "unknown",
     },
   });
 

@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db";
 import { generateAndStoreCode } from "@/lib/verification-code";
 import { sendVerificationCode } from "@/lib/sms";
 import { badRequest, serverError } from "@/lib/errors";
+import { smsRateLimit } from "@/lib/rate-limit";
 
 const sendCodeSchema = z.object({
   phone: z
@@ -30,6 +31,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     if (!driver || !driver.isActive) {
       return badRequest("未找到该司机，请联系管理员");
+    }
+
+    // SMS 频率限制：每个手机号每小时最多发送 5 条短信
+    const rateLimitResult = await smsRateLimit(phone);
+    if (!rateLimitResult.success) {
+      return NextResponse.json(
+        { error: "TOO_MANY_REQUESTS", message: "发送短信过于频繁，请稍后再试" },
+        { status: 429 },
+      );
     }
 
     // Rate-limit check and code generation are handled inside generateAndStoreCode

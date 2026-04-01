@@ -53,6 +53,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     session.role = user.role;
     await session.save();
 
+    // 审计日志：记录登录成功事件（fire-and-forget，不阻塞响应）
+    void prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        action: "admin.login",
+        target: `admin_user:${user.id}`,
+        detail: JSON.stringify({ username: user.username, role: user.role }),
+        ipAddress:
+          req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+          "unknown",
+      },
+    });
+
     return NextResponse.json({
       id: user.id,
       username: user.username,
