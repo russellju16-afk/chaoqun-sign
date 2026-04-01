@@ -3,6 +3,93 @@ import { unsealData } from "iron-session";
 import { SESSION_COOKIE_NAME, type SessionData } from "@/lib/session";
 
 // ---------------------------------------------------------------------------
+// Security headers applied to every response
+// ---------------------------------------------------------------------------
+
+const SECURITY_HEADERS: Record<string, string> = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "X-XSS-Protection": "1; mode=block",
+  "Referrer-Policy": "strict-origin-when-cross-origin",
+  "Permissions-Policy": "camera=(self), microphone=()",
+};
+
+function withSecurityHeaders(response: NextResponse): NextResponse {
+  for (const [header, value] of Object.entries(SECURITY_HEADERS)) {
+    response.headers.set(header, value);
+  }
+  return response;
+}
+
+// ---------------------------------------------------------------------------
+// In-memory rate limiter (edge-compatible — no Node.js / Redis APIs)
+//
+// Uses a simple fixed-window counter stored in a Map.  The Map is per-isolate
+// so it resets on cold starts; this is acceptable because:
+//   - Middleware runs on the Edge Runtime where persistent Redis is unavailable
+//   - Heavy rate limiting (per-token, per-phone) is enforced by the Redis-backed
+//     limiters in src/lib/rate-limit.ts inside the API route handlers themselves
+//   - This layer is a coarse DDoS-mitigation guard only
+// ---------------------------------------------------------------------------
+
+interface WindowEntry {
+  readonly count: number;
+  readonly windowStart: number; // epoch seconds
+}
+
+// Keyed by IP; intentionally module-level so it survives across requests in
+// the same isolate lifetime.
+const windowMap = new Map<string, WindowEntry>();
+
+/** Maximum requests per IP per window before returning 429. */
+const EDGE_LIMIT = 120;
+/** Window size in seconds. */
+const EDGE_WINDOW_SECONDS = 60;
+
+/**
+ * Returns true when the IP is within the allowed rate, false when it has
+ * exceeded the limit.  Mutates `windowMap` in place (this is intentional
+ * — the Map is effectively a singleton per Edge isolate).
+ */
+function checkEdgeRateLimit(ip: string): boolean {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const windowStart = Math.floor(nowSeconds / EDGE_WINDOW_SECONDS) * EDGE_WINDOW_SECONDS;
+
+  const existing = windowMap.get(ip);
+
+  if (existing === undefined || existing.windowStart !== windowStart) {
+    // New window — reset counter
+    windowMap.set(ip, { count: 1, windowStart });
+    return true;
+  }
+
+  if (existing.count >= EDGE_LIMIT) {
+    return false;
+  }
+
+  windowMap.set(ip, { count: existing.count + 1, windowStart });
+  return true;
+}
+
+// Periodically prune stale entries to avoid unbounded Map growth.
+// We check on every request but only prune once every ~1 000 requests.
+let pruneCounter = 0;
+const PRUNE_EVERY = 1_000;
+
+function maybePruneWindowMap(): void {
+  pruneCounter += 1;
+  if (pruneCounter < PRUNE_EVERY) return;
+  pruneCounter = 0;
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  for (const [ip, entry] of windowMap.entries()) {
+    if (nowSeconds - entry.windowStart > EDGE_WINDOW_SECONDS * 2) {
+      windowMap.delete(ip);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Route classification helpers
 // ---------------------------------------------------------------------------
 
@@ -76,13 +163,36 @@ async function getSessionData(
 export async function middleware(req: NextRequest): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
 
+  // -------------------------------------------------------------------------
+  // Edge rate limit for all /api/* routes
+  // -------------------------------------------------------------------------
+  if (pathname.startsWith("/api/")) {
+    maybePruneWindowMap();
+
+    const ip =
+      req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+      req.headers.get("x-real-ip") ??
+      "unknown";
+
+    if (!checkEdgeRateLimit(ip)) {
+      return withSecurityHeaders(
+        NextResponse.json(
+          { error: "TOO_MANY_REQUESTS", message: "请求过于频繁，请稍后重试" },
+          { status: 429 },
+        ),
+      );
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Non-admin and explicitly public paths pass through immediately
+  // -------------------------------------------------------------------------
   if (
     PUBLIC_API_PREFIXES.some(
       (prefix) => pathname === prefix || pathname.startsWith(prefix),
     )
   ) {
-    return NextResponse.next();
+    return withSecurityHeaders(NextResponse.next());
   }
 
   // Static / sign / driver UI paths pass through
@@ -93,33 +203,39 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
     pathname.startsWith("/_next/") ||
     pathname.startsWith("/favicon")
   ) {
-    return NextResponse.next();
+    return withSecurityHeaders(NextResponse.next());
   }
 
+  // -------------------------------------------------------------------------
   // Protected /api/admin/* (excluding /api/admin/auth/*)
+  // -------------------------------------------------------------------------
   if (isAdminApiPath(pathname)) {
     const session = await getSessionData(req);
     if (!session) {
-      return NextResponse.json(
-        { error: "UNAUTHORIZED", message: "未登录或会话已过期" },
-        { status: 401 },
+      return withSecurityHeaders(
+        NextResponse.json(
+          { error: "UNAUTHORIZED", message: "未登录或会话已过期" },
+          { status: 401 },
+        ),
       );
     }
-    return NextResponse.next();
+    return withSecurityHeaders(NextResponse.next());
   }
 
+  // -------------------------------------------------------------------------
   // Protected /admin/* UI routes (excluding /admin/login)
+  // -------------------------------------------------------------------------
   if (isAdminUiPath(pathname)) {
     const session = await getSessionData(req);
     if (!session) {
       const loginUrl = new URL("/admin/login", req.url);
       loginUrl.searchParams.set("from", pathname);
-      return NextResponse.redirect(loginUrl);
+      return withSecurityHeaders(NextResponse.redirect(loginUrl));
     }
-    return NextResponse.next();
+    return withSecurityHeaders(NextResponse.next());
   }
 
-  return NextResponse.next();
+  return withSecurityHeaders(NextResponse.next());
 }
 
 export const config = {
